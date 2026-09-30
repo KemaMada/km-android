@@ -1,0 +1,32 @@
+# Artefactos de construccion
+.gradle/
+.kotlin/
+build/
+**/build/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Configuracion local de la maquina
+local.properties
+
+# Claves de firma. NUNCA en git: una clave de firma versionada es una fuga,
+# permite a cualquiera publicar una actualizacion con la misma identidad que
+# tu app. Ver README.md ("Como firmar una release").
+*.jks
+*.keystore
+keystore.properties
+
+# Editores y sistema
+*.iml
+.idea/
+!.idea/codeStyles/
+.DS_Store
+Thumbs.db
+
+# Android Monitor / logs
+*.apk
+*.aab
+*.ap_
+*.dex
+captures/
