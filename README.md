@@ -56,9 +56,10 @@ Y el protocolo, tomado de `km-core`:
 - **No tiene `minifyEnabled`.** El build de release no ofusca nada
   (`isMinifyEnabled = false`), así que `proguard-rules.pro` está vacío.
 - **No hay CI.** No existe `.github/`. Los tests se ejecutan en local.
-- **No cubre la integración real.** Los 3 tests de `RelayClientIntegrationTest`
-  están marcados `@Ignore` ("Requires debugging of in-process WebSocket mock
-  relay"): se compilan y se cuentan, pero no se ejecutan.
+- **No cubre la integración real.** No hay un test que levante un relé real. La
+  cobertura de `RelayClient` es a nivel de **wire**: `RelayClientWireTest`
+  levanta un `MockWebServer` y comprueba los frames y el parseo sobre el
+  socket, no contra el protocolo de producción.
 
 ---
 
@@ -66,12 +67,12 @@ Y el protocolo, tomado de `km-core`:
 
 | Requisito | Versión | Nota |
 |-----------|---------|------|
-| Android SDK | platform **android-36** | `compileSdk = 36`, `targetSdk = 36`, `minSdk = 28`. |
-| Build tools | 36.x | |
-| JDK para ejecutar Gradle | 17 o superior | El toolchain 11 de `km-core` lo descarga `foojay-resolver-convention` si falta. |
-| Gradle | **9.5.0** | Solo con el wrapper: `./gradlew`. |
-| AGP / Kotlin | 9.3.1 / 2.2.10 | Fijados en `gradle/libs.versions.toml`. |
-| Checkout hermano de km-framework | — | Ver [Dependencia del framework](#dependencia-del-framework). |
+| Android SDK | platform **android-34** | `compileSdk = 34`, `targetSdk = 34`, `minSdk = 26`. |
+| Build tools | 34.x o superior | |
+| JDK para ejecutar Gradle | **17** | Ver la nota de abajo: `gradle.properties` no fija el JDK. |
+| Gradle | **8.7** | Solo con el wrapper: `./gradlew`. |
+| AGP / Kotlin | 8.5.0 / 2.1.20 | Fijados en `gradle/libs.versions.toml`. |
+| `com.km:km-core` en `mavenLocal()` | 0.1.0-SNAPSHOT | Ver [Dependencia del framework](#dependencia-del-framework). |
 
 Configura el SDK en `local.properties` (está en `.gitignore`, no se versiona):
 
@@ -91,30 +92,44 @@ sdk.dir=/ruta/a/tu/Android/Sdk
 ./gradlew :app:testDebugUnitTest
 ```
 
-En este entorno hay que fijar el JDK en la invocación:
+Hay que pasar el JDK en la invocación, porque una ruta fija en
+`gradle.properties` no viaja entre máquinas:
 
 ```sh
-./gradlew -Dorg.gradle.java.home=/usr/lib/jvm/java-27-openjdk :app:assembleDebug
-./gradlew -Dorg.gradle.java.home=/usr/lib/jvm/java-27-openjdk :app:testDebugUnitTest
+./gradlew -Dorg.gradle.java.home=/ruta/a/tu/jdk-17 :app:assembleDebug
+./gradlew -Dorg.gradle.java.home=/ruta/a/tu/jdk-17 :app:testDebugUnitTest
 ```
 
-`gradle.properties` **no** fija `org.gradle.java.home`: es una ruta específica de
-cada máquina y no debe viajar en el repositorio.
+Este build **requiere JDK 17**: AGP 8.5.0 y Kotlin 2.1.20 no arrancan con el
+JDK 27 que es el `default` de la máquina. Un JDK más nuevo no vale, uno más
+antiguo tampoco.
 
 ### Estado medido de los tests
 
-`./gradlew :app:testDebugUnitTest` — `exit 0`:
+`./gradlew :app:testDebugUnitTest` — `exit 0`, **45 / 0 / 0**:
 
 | Clase | Declarados | Ejecutados | Skip | Fallos |
 |-------|-----------:|-----------:|-----:|-------:|
 | `ExampleUnitTest` | 1 | 1 | 0 | 0 |
+| `RelayDataCodecTest` | 22 | 22 | 0 | 0 |
+| `RelayClientWireTest` | 13 | 13 | 0 | 0 |
 | `RelayClientIdempotencyTest` | 6 | 6 | 0 | 0 |
-| `RelayClientIntegrationTest` | 3 | 0 | 3 | 0 |
-| **Total** | **10** | **7** | **3** | **0** |
+| `RelayDataResidualPathsTest` | 3 | 3 | 0 | 0 |
+| **Total** | **45** | **45** | **0** | **0** |
 
-Los 3 skips son los `@Ignore` de arriba, no fallos. Antes de cada corrida,
-borra `app/build/test-results`: si el directorio no existe tras la corrida, la
-corrida no ocurrió.
+Cero skips: no hay ningún `@Ignore`. Antes de cada corrida, borra
+`app/build/test-results`: si el directorio no existe tras la corrida, la corrida
+no ocurrió.
+
+Dos detalles de los unit tests, porque no son opcionales:
+
+- **`org.json` real en el classpath.** El `android.jar` que se usa en JVM unit
+  tests tiene `org.json` como stub que lanza `"not mocked"` en cada llamada, así
+  que `RelayDataCodec` y `RelayClient` no correrían. Por eso está
+  `testImplementation(libs.orgjson)`.
+- **`MockWebServer` en la misma versión que `okhttp`.** Se compila contra clases
+  internas de `okhttp`; un desfase de versión no falla al compilar, falla en
+  runtime con `NoSuchMethodError`.
 
 ---
 
@@ -134,34 +149,34 @@ tenía, y sin ellos no se puede consumir como dependencia). Elegí:
 | `group` | `com.km` | Coherente con los paquetes `com.km.*` del framework, y es el grupo que el README de km-framework ya declara como previsto. |
 | `version` | `0.1.0-SNAPSHOT` | El proyecto está por debajo de 1.0 (`CHANGELOG.md` de km-framework), y el sufijo `-SNAPSHOT` deja explícito que **no hay ninguna versión publicada**. |
 
-Declarar coordenadas **no** publica nada: km-core sigue sin plugin
-`maven-publish` y sin repositorio.
+Declarar coordenadas **no** publica nada. Hoy km-core **sí** tiene el plugin
+`maven-publish` con destino `mavenLocal()`, pero sigue sin estar en Maven Central:
+`0.1.0-SNAPSHOT` solo existe en tu `~/.m2/repository`.
 
-### Provisional: composite build
+### Provisional: `mavenLocal()`
 
-Como km-core no está publicado, hoy no existe un repositorio del que resolver
-`com.km:km-core`. Lo que lo resuelve es esto, en `settings.gradle.kts`:
+Como km-core no está publicado en ningún registro, hoy no existe un repositorio
+del que resolver `com.km:km-core`. Lo que lo resuelve es `mavenLocal()` en
+`settings.gradle.kts`, combinado con publicar km-core antes de compilar:
 
-```kotlin
-includeBuild("../KeyMessage")   // el checkout hermano de km-framework
+```sh
+# 1. Publicar km-core en mavenLocal (desde el checkout de km-framework)
+./gradlew -p ../KeyMessage :km-core:publishToMavenLocal
+
+# 2. Compilar esta app
+./gradlew :app:assembleDebug
 ```
 
-Gradle compila km-core desde el código fuente y **sustituye** la dependencia
-`com.km:km-core:0.1.0-SNAPSHOT` por el proyecto `:km-core` de ese checkout.
+> **Esto es un puente, no el estado final.** Requiere que km-core esté en disco y
+> publicado en tu `~/.m2`. Cuando km-core se publique en Maven Central,
+> `app/build.gradle.kts` **no cambia** (misma group, misma version); lo que
+> desaparece es `mavenLocal()` y `mavenCentral()` pasa a ser la fuente real.
 
-> **Esto es un puente, no el estado final.** Requiere tener km-framework en disco
-> y a la misma altura. Cuando km-core se publique, `app/build.gradle.kts` **no
-> cambia** (misma group, misma version); lo que desaparece es el `includeBuild`
-> y `mavenCentral()` pasa a ser la fuente real del artefacto. Si tu clone local
-> de km-framework se llama distinto, ajusta la ruta del `includeBuild`.
-
-> En este entorno el checkout de km-framework se llama `KeyMessage` (en GitHub
-> el repositorio se llama `km-framework`), por eso la ruta es `../KeyMessage`.
-
-**Verificado:** con el puente activo, `com/km/api/KeyMessageCore`,
+**Verificado:** `com/km/api/KeyMessageCore`, `com/km/auth/AuthVerifier`,
 `com/km/crypto/Ed25519Impl`, `com/km/model/Message`, `com/km/node/RelayTransport`,
 `com/km/protocol/Transport` y `com/km/storage/MessageStore` están dentro de
-`app-debug.apk`. `com/keymessage/core/*` no aparece en ningún dex.
+`app-debug.apk`. `com/keymessage/core/*` no aparece en ningún dex
+(`dexdump | grep -c com/keymessage/core` → `0`).
 
 ---
 
@@ -228,29 +243,44 @@ otro.
 │       │   ├── AppContainer.kt            DI manual: core, base de datos, transporte
 │       │   ├── KeyMessageApp.kt           Application
 │       │   ├── crypto/ data/ model/ util/
-│       │   ├── network/                   RelayClient, WebRtcManager, ChatManager, dht/
+│       │   ├── network/                   RelayClient, RelayDataCodec, WebRtcManager, ChatManager, dht/
 │       │   ├── storage/room/              entidades, DAOs, implementaciones Room
 │       │   └── ui/                        MainActivity, ViewModel, screens/, theme/
 │       ├── main/res/                      iconos, temas, strings
-│       ├── test/java/...                  3 clases de test unitario
+│       ├── test/java/...                  5 clases de test unitario (45 tests)
 │       └── androidTest/java/...           1 test instrumentado (esqueleto de Android Studio)
-├── gradle/libs.versions.toml              catálogo de versiones (copiado de km-framework)
-├── settings.gradle.kts                    includeBuild del framework + include(":app")
+├── gradle/libs.versions.toml              catálogo de versiones
+├── settings.gradle.kts                    mavenLocal() + include(":app")
 ├── build.gradle.kts                       plugins declarados, no aplicados
 ├── gradle.properties                      sin org.gradle.java.home: es ruta local
 ├── LICENSE                                MIT, Copyright (c) 2026 KemaMada
 └── .gitignore                             incluye *.jks, *.keystore, build/
 ```
 
-39 ficheros `.kt`: 35 en `main`, 3 en `test`, 1 en `androidTest`.
+40 ficheros `.kt`: 34 en `main`, 5 en `test`, 1 en `androidTest`.
 
 ### Nota sobre `gradle/libs.versions.toml`
 
-Es una **copia** del de km-framework, no un enlace: Gradle no comparte catálogos
-de versiones entre builds. Las entradas que km-android no usa (`bcprov`,
-`webrtc-java`, `kotlin-jvm`) siguen ahí. Si el framework actualiza una versión,
-hay que replicarla aquí; si no, los dos proyectos compilarán contra versiones
-distintas de la misma biblioteca.
+Gradle no comparte catálogos de versiones entre builds, así que el de
+km-android es una **copia** del de km-framework, no un enlace. Si el framework
+actualiza una versión, hay que replicarla aquí; si no, los dos proyectos
+compilarán contra versiones distintas de la misma biblioteca.
+
+Dos decisiones que conviene no deshacer:
+
+- **Compose va por BOM.** `androidx-compose-bom` constrain `ui`, `material3` e
+  `icons` a un único conjunto alineado. Fijar `version.ref` en los aliases
+  individuales es lo que dejó antes `ui 1.5.1` conviviendo con `material3 1.1.2`.
+- **El plugin `kotlinCompose` se aplica a mano.** Con Kotlin 2.x el compiler de
+  Compose va dentro del plugin de Kotlin. Si no se aplica
+  `org.jetbrains.kotlin.plugin.compose`, AGP inyecta su valor por defecto
+  (compose compiler 1.3.2), que exige Kotlin 1.7.20 y no compila.
+
+`webrtc` apunta a `io.github.webrtc-sdk:android`, el AAR de Android. **No** es
+`dev.onvoid.webrtc:webrtc-java`: ese es el build de escritorio (packages
+`dev.onvoid.webrtc.*`, natives `linux-x86_64`) y no aporta ninguna clase
+`org.webrtc.*`. El nombre de la clave de versión (`webrtc-java`) es un resto del
+catálogo de km-framework y no describe lo que resuelve.
 
 ### Nota sobre el paquete propio
 
@@ -265,8 +295,8 @@ porque se resuelven contra el `namespace`.
 
 ## Renombrado de paquetes: la regla de tres formas
 
-km-core se renombró de `com.keymessage.core.*` a `com.km.*`. Los 13 ficheros de
-esta app que lo usaban se migraron con esta tabla:
+km-core se renombró de `com.keymessage.core.*` a `com.km.*`. Los ficheros de esta
+app que lo usaban se migraron con esta tabla:
 
 | Antes | Ahora |
 |-------|-------|
@@ -304,10 +334,11 @@ que quedan son el paquete propio `com.example.keymessage`, el grupo Maven
 
 - **Atribución de software de terceros.** km-framework tiene `NOTICE` y
   `THIRD-PARTY-LICENSES/`. km-android **no**, y debería: sus dependencias
-  directas (Room, Compose, AppCompat, Material, Navigation, zxing,
-  zxing-android-embedded, okhttp, webrtc-sdk, security-crypto) no están
-  documentadas. Faltan.
-- **Subir el proyecto al remoto.** El remoto `origin` apunta a
-  `https://github.com/KemaMada/km-android.git` y **no** se ha hecho `push`.
+  directas (Room, Compose, AppCompat, Navigation, zxing-android-embedded,
+  okhttp, webrtc-sdk, security-crypto, jackson-kotlin) no están documentadas.
+  Faltan.
 - **Sin `NOTICE` propio** que explique por qué esta app es MIT sin concesión
   explícita de patentes (km-framework sí lo razona en su `CONTRIBUTING.md`).
+- **Publicar `com.km:km-core`.** Hoy la build depende de `mavenLocal()`, así que
+  un clon limpio necesita primero un `:km-core:publishToMavenLocal` desde el
+  checkout del framework. Sin eso, Gradle no encuentra la dependencia.

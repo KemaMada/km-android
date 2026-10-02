@@ -81,7 +81,7 @@ class RelayClient(
             pendingMessages.add(data to to)
             return@runCatching
         }
-        webSocket?.send(String(data))
+        webSocket?.send(messageEnvelope(RelayDataCodec.TYPE_MESSAGE, localIdentity, to, data))
     }
 
     override fun isOnline(): Boolean = state.get() == ConnectionState.ONLINE
@@ -158,10 +158,16 @@ class RelayClient(
                 "PEER_OFFLINE" -> handlePeerOffline(json)
                 "PING" -> handlePing(json)
                 "RELAY_ERROR" -> handleRelayError(json)
+                // `STORED` y `RELAY_EXPIRED` son JSON de CONTROL: viajan enteros
+                // y los parsea JsonRelayControlCodec (§13). No pasan por el codec
+                // de datos.
                 "STORED" -> handleStored(text)
                 "RELAY_EXPIRED" -> handleRelayExpired(text)
-                "MESSAGE" -> messageHandlers.forEach { it(text.toByteArray()) }
-                "ACK" -> ackHandlers.forEach { it(text.toByteArray()) }
+                // El camino de DATOS: el handler recibe la carga YA en bytes, no
+                // el texto del sobre. Un `data` ausente o con Base64 invalido no
+                // entrega NADA: §14.1 es atomico y no existe carga parcial.
+                RelayDataCodec.TYPE_MESSAGE -> deliverPayload(messageHandlers, text)
+                RelayDataCodec.TYPE_ACK -> deliverPayload(ackHandlers, text)
                 else -> {}
             }
         } catch (e: Exception) {
@@ -285,8 +291,34 @@ class RelayClient(
     private fun drainPendingMessages() {
         while (true) {
             val pending = pendingMessages.poll() ?: break
-            webSocket?.send(String(pending.first))
+            // Mismo `messageEnvelope` que `send()`: la cola no puede ser un
+            // camino de datos distinto al del envio en linea.
+            webSocket?.send(messageEnvelope(RelayDataCodec.TYPE_MESSAGE, localIdentity, pending.second, pending.first))
         }
+    }
+
+    /**
+     * Sobre de salida del camino de DATOS (KM-WIRE-RELAY §10).
+     *
+     * Unico punto por el que un `ByteArray` de payload entra en el socket.
+     * `RelayDataCodec` se encarga de Base64 estándar; aqui no queda ninguna
+     * conversion de bytes a texto, y el texto que sale es un frame que el
+     * relé puede leer.
+     */
+    private fun messageEnvelope(type: String, from: IdentityId, to: IdentityId, payload: ByteArray): String =
+        RelayDataCodec.encodeEnvelope(type, from, to, payload)
+
+    /**
+     * Reparte un sobre entrante a los handlers, con la carga YA en bytes.
+     *
+     * Un sobre que no se puede decodificar entero no entrega nada (§14.1):
+     * antes, `text.toByteArray()` entregaba el JSON entero disfrazado de
+     * payload cuando faltaba `data`, y bytes corruptos cuando el Base64 no
+     * era valido.
+     */
+    private fun deliverPayload(handlers: MutableList<(ByteArray) -> Unit>, text: String) {
+        val envelope = RelayDataCodec.decodeEnvelope(text).getOrNull() ?: return
+        handlers.forEach { it(envelope.data) }
     }
 
     private fun computeAuthSignature(nonce: String, timestamp: Long): String {
