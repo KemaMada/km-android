@@ -1,11 +1,14 @@
 package com.example.keymessage.network
 
+import com.km.codec.JsonDecoder
 import com.km.codec.JsonRelayControlCodec
 import com.km.crypto.Ed25519Impl
 import com.km.crypto.KeyPair
 import com.km.frame.BinarySecureFrameCodec
 import com.km.frame.FrameType
 import com.km.frame.RatchetHeader
+import com.km.model.Ack
+import com.km.model.AckStatus
 import com.km.model.IdentityId
 import com.km.model.MessageId
 import com.km.model.RelayExpiredNotice
@@ -51,9 +54,13 @@ class RelayClientWireTest {
     private lateinit var client: RelayClient
 
     private val ed25519 = Ed25519Impl()
-    private val aliceId = IdentityId("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c")
+    // Los tres identificadores son 64 hex, que es la forma canonica de un
+    // IdentityId (KM-ID-0001 seccion 6: SHA-256 -> 32 bytes -> 64 hex). Con
+    // literales mas cortos, el test del transcript no comprobaba la
+    // disposicion 16 + 8 + 64 + 64 = 152 bytes que exige KM-0002.
+    private val aliceId = IdentityId("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2")
     private val bobId = IdentityId("0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9")
-    private val relayId = IdentityId("f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0")
+    private val relayId = IdentityId("f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e8")
 
     /** Nonce y timestamp del challenge: fijos, para poder recomputar la firma. */
     private val challengeNonce = ByteArray(16) { (it * 31 + 7).toByte() }
@@ -246,13 +253,31 @@ class RelayClientWireTest {
     }
 
     @Test
-    fun `an incoming ACK delivers the exact payload bytes`() {
+    fun `an incoming ACK delivers the six canonical fields`() {
+        // Este test antes fijaba un contrato que NINGUN otro extremo hablaba: un
+        // `ACK` con la carga en `data`, repartido por `deliverPayload` igual que
+        // un `MESSAGE`. El `ACK` de §11.2 no tiene `data`, asi que ese camino lo
+        // descartaba siempre. Lo que se fija ahora es el contrato real, el del
+        // escritorio: seis campos de texto, leidos enteros.
+        // El detalle del ACK —incluido por que no puede vestirse de `MESSAGE`— vive
+        // en `RelayClientAckTest`.
         connectOnline()
-        val payload = ByteArray(64) { (it * 13 + 5).toByte() }.also { it[0] = 0x00; it[63] = 0xFF.toByte() }
+        val ack = Ack(
+            from = bobId,
+            to = aliceId,
+            originalMessageId = MessageId(UUID.randomUUID()),
+            status = AckStatus.DELIVERED,
+            timestamp = 1_790_000_000_000L,
+            signature = ByteArray(64) { (it * 13 + 5).toByte() },
+        )
 
-        sendToClient(envelope(RelayDataCodec.TYPE_ACK, bobId, aliceId, payload))
+        sendToClient(RelayDataCodec.encodeAck(ack))
 
-        assertArrayEquals(payload, receivedAcks.poll(5, TimeUnit.SECONDS))
+        val delivered = JsonDecoder().decodeAck(receivedAcks.poll(5, TimeUnit.SECONDS)!!).getOrThrow()
+        assertEquals(ack.originalMessageId, delivered.originalMessageId)
+        assertEquals(bobId, delivered.from)
+        assertEquals(AckStatus.DELIVERED, delivered.status)
+        assertArrayEquals(ack.signature, delivered.signature)
     }
 
     @Test
@@ -272,10 +297,16 @@ class RelayClientWireTest {
         connectOnline()
 
         sendToClient("""{"type":"MESSAGE","from":"${bobId.value}","to":"${aliceId.value}"}""")
-        sendToClient("""{"type":"ACK","from":"${bobId.value}","to":"${aliceId.value}"}""")
-
         assertNull("un MESSAGE sin `data` no puede entregar el JSON entero", neverDelivered(receivedMessages))
-        assertNull("un ACK sin `data` no puede entregar el JSON entero", neverDelivered(receivedAcks))
+
+        // Un `ACK` sin `originalMessageId` se descarta por la misma razon atomica,
+        // y ahora por el codec del `ACK` y no por `decodeEnvelope`: el `ACK` no
+        // pasa por `data` en ningun caso.
+        sendToClient(
+            """{"type":"ACK","from":"${bobId.value}","to":"${aliceId.value}","status":"DELIVERED",
+               "timestamp":1,"signature":"AQID"}"""
+        )
+        assertNull("un ACK sin `originalMessageId` no puede entregar nada", neverDelivered(receivedAcks))
     }
 
     // =====================================================================
@@ -357,6 +388,17 @@ class RelayClientWireTest {
             write(relayId.value.toByteArray(Charsets.US_ASCII))
             write(aliceId.value.toByteArray(Charsets.US_ASCII))
         }.toByteArray()
+
+        // KM-0002: el transcript son 16 nonce + 8 ts + 64 responderId +
+        // 64 identityId = 152 bytes. La longitud se comprueba ANTES de la
+        // firma: si un identityId vuelve a 40 hex, la firma seguiria siendo
+        // verificable byte a byte aqui y el fallo pasaria al rele.
+        assertEquals(
+            "el transcript de autenticacion mide 16 + 8 + 64 + 64 = 152 bytes (KM-0002)",
+            152,
+            transcript.size,
+        )
+
         val expected = ed25519.sign(keyPair.privateKey, transcript).bytes
 
         assertArrayEquals(

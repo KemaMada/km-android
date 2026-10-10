@@ -5,7 +5,9 @@ import java.util.Properties
 plugins {
     alias(libs.plugins.androidApplication)
     alias(libs.plugins.kotlinAndroid)
-    alias(libs.plugins.kotlinKapt)
+    // Room se procesa con KSP2, no con KAPT. KSP esta versionado contra la
+    // version de Kotlin (`ksp` en libs.versions.toml): los dos bumped juntos.
+    alias(libs.plugins.ksp)
     // Required with Kotlin 2.x: the Compose compiler lives inside the Kotlin
     // plugin, so this marker must be applied or AGP injects its legacy
     // compose compiler 1.3.2 default, which requires Kotlin 1.7.20.
@@ -119,6 +121,16 @@ android {
             excludes += "META-INF/NOTICE"
             excludes += "META-INF/NOTICE.txt"
             excludes += "META-INF/notice.txt"
+            // Room 2.7.x arrastra BouncyCastle (bcprov) y jspecify, y los dos
+            // contribute META-INF/versions/9/OSGI-INF/MANIFEST.MF. Sin esto
+            // el paso de empaquetado aborta con "Duplicate resources".
+            // La exclusion es quirurgica: no toca ni codigo ni recursos.
+            excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+            // Firmas de los JAR: varias dependencias traen la misma, y el
+            // empaquetador no puede deduplicarlas.
+            excludes += "META-INF/*.SF"
+            excludes += "META-INF/*.DSA"
+            excludes += "META-INF/*.RSA"
         }
     }
 }
@@ -147,7 +159,7 @@ dependencies {
     // Room
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
-    kapt(libs.androidx.room.compiler)
+    ksp(libs.androidx.room.compiler)
 
     // Coroutines
     implementation(libs.kotlinx.coroutines.android)

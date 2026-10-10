@@ -28,7 +28,8 @@ import java.util.Random
  */
 class RelayDataCodecTest {
 
-    private val alice = IdentityId("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c")
+    // 64 hex: la forma canonica de un IdentityId (KM-ID-0001 seccion 6).
+    private val alice = IdentityId("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2")
     private val bob = IdentityId("0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9")
 
     // =====================================================================

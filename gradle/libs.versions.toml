@@ -1,11 +1,20 @@
 [versions]
 # AGP 8.5.x is the floor for the integrated Kotlin 2.x Compose compiler plugin.
 agp = "8.5.0"
-kotlin = "2.1.20"
+# Kotlin MUST track the version km-core is compiled with. km-core is on 2.2.10
+# and emits metadata version 2.2.0; staying on 2.1.20 is what produced
+# "Provided Metadata instance has version 2.2.0, while maximum supported
+# version is 2.1.0" when the Room compiler read the framework's classes.
+kotlin = "2.2.10"
 # Version of the Compose compiler Gradle plugin. MUST match the Kotlin version:
 # with Kotlin 2.x the compiler ships inside the Kotlin plugin, so the
 # `org.jetbrains.kotlin.plugin.compose` marker is versioned in lockstep with KGP.
-kotlinCompose = "2.1.20"
+kotlinCompose = "2.2.10"
+# KSP is version-locked to the Kotlin version by its own plugin: applying
+# 2.2.10-2.0.2 over Kotlin 2.1.20 fails with "is too new for kotlin-2.1.20.
+# Please upgrade kotlin-gradle-plugin to 2.2.10". The `-2.0.x` line is KSP2,
+# which replaces KAPT for Room on Kotlin 2.x.
+ksp = "2.2.10-2.0.2"
 coreKtx = "1.12.0"
 appcompat = "1.6.1"
 activityCompose = "1.8.0"
@@ -13,7 +22,9 @@ lifecycle = "2.7.0"
 navigationCompose = "2.7.5"
 # Compose artifacts are pinned to a BOM so ui/material3/icons never disagree.
 composeBom = "2024.09.03"
-room = "2.7.0-alpha02"
+# Room 2.7.2 is the floor that reads Kotlin 2.2 metadata: 2.6.1 and
+# 2.7.0-alpha02 cap at 2.1.0 through their shaded kotlinx-metadata-jvm.
+room = "2.7.2"
 kotlinxCoroutines = "1.7.3"
 okhttp = "4.12.0"
 # MockWebServer must track okhttp exactly: it is compiled against okhttp's
@@ -39,7 +50,10 @@ espresso = "3.5.1"
 [plugins]
 androidApplication = { id = "com.android.application", version.ref = "agp" }
 kotlinAndroid = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
-kotlinKapt = { id = "org.jetbrains.kotlin.kapt", version.ref = "kotlin" }
+# Room is processed by KSP2. KAPT is gone: it goes through the same shaded
+# kotlinx-metadata-jvm that capped the framework at metadata 2.1.0, and KSP
+# is the supported path for Room 2.7.x on Kotlin 2.x.
+ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
 kotlinCompose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlinCompose" }
 
 [libraries]

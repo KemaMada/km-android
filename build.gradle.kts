@@ -5,7 +5,7 @@
 plugins {
     alias(libs.plugins.androidApplication) apply false
     alias(libs.plugins.kotlinAndroid) apply false
-    alias(libs.plugins.kotlinKapt) apply false
+    alias(libs.plugins.ksp) apply false
     // Compose compiler ships inside the Kotlin plugin since Kotlin 2.0.
     // Applying it is what stops AGP from falling back to its hardcoded
     // compose compiler 1.3.2 default (which requires Kotlin 1.7.20).

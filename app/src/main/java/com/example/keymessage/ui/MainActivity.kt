@@ -87,7 +87,11 @@ class MainActivity : ComponentActivity() {
                             localIdentity = app.container.localIdentity
                         )
                     }
-                    val peerId = remember { com.km.model.IdentityId("b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0") }
+                    // Placeholder de UI: mismo espacio de identificadores que
+                    // IdentityId (64 hex, KM-ID-0001 seccion 6). Un literal de
+                    // 40 hex aqui entra en el transcript de autenticacion como
+                    // `identityId` y rompe la disposicion 16 + 8 + 64 + 64.
+                    val peerId = remember { com.km.model.IdentityId("b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0") }
                     val vm: com.example.keymessage.ui.ConversationViewModel = viewModel(
                         factory = com.example.keymessage.ui.ConversationViewModel.Factory(repo, app.container.core, peerId, "Test Peer")
                     )

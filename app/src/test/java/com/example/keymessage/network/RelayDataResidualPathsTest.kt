@@ -104,10 +104,18 @@ class RelayDataResidualPathsTest {
         val sends = sends()
 
         // Las unicas formas legitimas: el sobre de datos construido por el
-        // codec, y el JSON de control ya serializado. `String(payload)` — el
-        // defecto — no esta, y no hay ninguna otra via.
+        // codec, el `ACK` construido por su propio codec, y el JSON de control ya
+        // serializado. `String(payload)` — el defecto — no esta, y no hay ninguna
+        // otra via.
+        //
+        // `RelayDataCodec.encodeAck(...)` se admite porque es la MISMA clase que
+        // ya se admitia para el `MESSAGE`, aplicada al otro frame con carga: el
+        // `ACK` sale por su propio codec, no por un `String(...)` disfrazado. Lo
+        // que este test sigue prohibiendo es exactamente lo de antes, y un
+        // `send()` con cualquier otra forma sigue fallando.
         fun isAllowed(argument: String): Boolean =
             argument.startsWith("messageEnvelope(") ||
+                argument.startsWith("RelayDataCodec.encodeAck(") ||
                 argument == "msg.toString()" ||
                 argument == "pong.toString()"
 

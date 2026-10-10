@@ -1,6 +1,7 @@
 package com.example.keymessage.network
 
 import com.km.crypto.Ed25519
+import com.km.codec.JsonDecoder
 import com.km.codec.JsonRelayControlCodec
 import com.km.model.IdentityId
 import com.km.model.RelayExpiredNotice
@@ -84,6 +85,36 @@ class RelayClient(
         webSocket?.send(messageEnvelope(RelayDataCodec.TYPE_MESSAGE, localIdentity, to, data))
     }
 
+    /**
+     * `ACK` saliente por el frame `ACK`, NO por un `MESSAGE`. F2/D1.
+     *
+     * Es un metodo aparte, y no un caso dentro de [send], porque [send] fija el
+     * discriminante a `MESSAGE`: un `ACK` que saliera por ahi llegaria al otro
+     * extremo disfrazado de mensaje entrante, lo entregaria a `messageHandler`,
+     * y ese mensaje generaria OTRO `ACK`. Ese es el ciclo de amplificacion, y no
+     * se arregla reintentando ni cifrando dos veces: se arregla dejando de
+     * compartir el camino.
+     *
+     * `ackBytes` viene en el vocabulario de `km-core` —es lo que firma
+     * `ReceiverImpl`— y el envelope del cable lo escribe `RelayDataCodec.encodeAck`,
+     * que conserva el `originalMessageId`. Ese campo es lo que empareja el `ACK`
+     * con el registro del emisor; acuñar uno nuevo aqui dejaria la entrega sin
+     * poder confirmarse, en silencio.
+     *
+     * A diferencia de [send], un `ACK` con la sesion caida NO se encola: no hay
+     * destinatario al que reenviarlo y su valor caduca en cuanto el emisor agota
+     * los reintentos. Encolarlo solo produciria un frame `ACK` cambiando a mitad
+     * de conversacion, contra un `originalMessageId` que el receptor ya no tiene.
+     */
+    override fun sendAck(ackBytes: ByteArray): Result<Unit> = runCatching {
+        if (state.get() != ConnectionState.ONLINE) {
+            throw IllegalStateException("transporte no conectado: el ACK no se encola")
+        }
+        val ack = JsonDecoder().decodeAck(ackBytes).getOrThrow()
+        webSocket?.send(RelayDataCodec.encodeAck(ack))
+            ?: throw IllegalStateException("no hay WebSocket abierto")
+    }
+
     override fun isOnline(): Boolean = state.get() == ConnectionState.ONLINE
 
     override fun connectionState(): ConnectionState = state.get()
@@ -163,11 +194,18 @@ class RelayClient(
                 // de datos.
                 "STORED" -> handleStored(text)
                 "RELAY_EXPIRED" -> handleRelayExpired(text)
-                // El camino de DATOS: el handler recibe la carga YA en bytes, no
-                // el texto del sobre. Un `data` ausente o con Base64 invalido no
-                // entrega NADA: §14.1 es atomico y no existe carga parcial.
+                // El camino de DATAS del `MESSAGE`: el handler recibe la carga YA
+                // en bytes, no el texto del sobre. Un `data` ausente o con Base64
+                // invalido no entrega NADA: §14.1 es atomico y no existe carga
+                // parcial. La carga viaja INTACTA, con su `messageId` de
+                // aplicacion dentro, y por eso el `ACK` que se firme a la vuelta
+                // lo puede confirmar el emisor.
                 RelayDataCodec.TYPE_MESSAGE -> deliverPayload(messageHandlers, text)
-                RelayDataCodec.TYPE_ACK -> deliverPayload(ackHandlers, text)
+                // El `ACK` NO lleva `data`: sus seis campos de §11.2 son texto y
+                // se leen aqui, enteros. Pasarlo por `deliverPayload` lo
+                // descartaba siempre —le falta `data`— y cada `ACK` se perdia
+                // sin llegar a ningun handler. R2.2.
+                RelayDataCodec.TYPE_ACK -> deliverAck(text)
                 else -> {}
             }
         } catch (e: Exception) {
@@ -319,6 +357,24 @@ class RelayClient(
     private fun deliverPayload(handlers: MutableList<(ByteArray) -> Unit>, text: String) {
         val envelope = RelayDataCodec.decodeEnvelope(text).getOrNull() ?: return
         handlers.forEach { it(envelope.data) }
+    }
+
+    /**
+     * Entrega un `ACK` entrante a los handlers, en el vocabulario de `km-core`.
+     *
+     * La conversion es de un solo sentido aqui: el frame del cable se lee entero
+     * y se vuelve a codificar con `JsonEncoder`, que es lo que `AckManagerImpl`
+     * sabe verificar. No se repara ni se completa: un `ACK` al que le falte un
+     * campo, o con un `originalMessageId` que no sea UUID, no llega a nadie.
+     *
+     * La firma viaja tal cual entra y sale (§11.1 ya enmendada: el relé reenvía
+     * el `ACK` verbatim). Reparar un `ACK` dudoso produciría uno distinto del
+     * firmado, que es peor que perderlo.
+     */
+    private fun deliverAck(text: String) {
+        val ack = RelayDataCodec.decodeAck(text) ?: return
+        val bytes = RelayDataCodec.toCoreAckBytes(ack) ?: return
+        ackHandlers.forEach { it(bytes) }
     }
 
     private fun computeAuthSignature(nonce: String, timestamp: Long): String {
