@@ -131,7 +131,7 @@ class RelayClientAckTest {
             localIdentity = aliceId,
             localPrivateKey = keyPair.privateKey,
             localPublicKey = keyPair.publicKey,
-            relayIdentityId = relayId,
+            pinnedRelayIdentityId = relayId.value,
             ed25519 = ed25519,
             maxReconnectDelayMs = 500,
         )

@@ -1,5 +1,6 @@
 package com.example.keymessage.network
 
+import com.example.keymessage.RelayIdentityPin
 import com.example.keymessage.util.LogBuffer
 import com.km.crypto.Ed25519
 import com.km.codec.JsonDecoder
@@ -32,7 +33,10 @@ class RelayClient(
     private val localIdentity: IdentityId,
     private val localPrivateKey: ByteArray,
     private val localPublicKey: ByteArray,
-    private val relayIdentityId: IdentityId,
+    // E1/1.3: identidad del relevo FIJADA (pin), no adoptada. `null` o
+    // malformada => rechazo seguro: el transporte no autentica. Ver
+    // RelayIdentityPin.
+    private val pinnedRelayIdentityId: String?,
     private val ed25519: Ed25519,
     private val maxReconnectDelayMs: Long = 30000
 ) : RelayTransport {
@@ -62,6 +66,18 @@ class RelayClient(
     private var expectedServerNonce: String? = null
 
     override fun connect(): Result<Unit> = runCatching {
+        // E1/1.3 — pin OBLIGATORIO. Sin una identidad de relevo fijada y valida
+        // (64 hex minusculas) no se abre siquiera la conexion: es un rechazo
+        // seguro, nunca una degradacion silenciosa que autentique contra lo que
+        // el relevo anuncie. Ver RelayIdentityPin.
+        if (!RelayIdentityPin.isValid(pinnedRelayIdentityId)) {
+            LogBuffer.log(
+                RELAY_LOG_TAG,
+                "sin identidad de relevo fijada valida: no se autentica (rechazo seguro)",
+            )
+            setState(ConnectionState.DISCONNECTED)
+            return@runCatching
+        }
         val current = state.get()
         if (current != ConnectionState.DISCONNECTED && current != ConnectionState.RECONNECTING) {
             return@runCatching
@@ -271,6 +287,10 @@ class RelayClient(
     }
 
     private fun sendAuthRequest() {
+        // El pin ya se valido en `connect()`; aqui solo se declara. Es la
+        // MISMA identidad que la del transcript: el contrato de AUTH_REQUEST no
+        // cambia (se sigue enviando `responderIdentityId`).
+        val pin = pinnedRelayIdentityId ?: return
         val msg = JSONObject().apply {
             put("type", "AUTH_REQUEST")
             put("messageId", UUID.randomUUID().toString())
@@ -278,7 +298,7 @@ class RelayClient(
             put("protocolVersion", "2.0")
             put("identityId", localIdentity.value)
             put("publicKey", publicKeyBase64())
-            put("responderIdentityId", relayIdentityId.value)
+            put("responderIdentityId", pin)
             put("capabilities", JSONObject().apply {
                 put("serialization", org.json.JSONArray(listOf("json")))
             })
@@ -289,9 +309,31 @@ class RelayClient(
     private fun handleAuthChallenge(json: JSONObject) {
         val nonce = json.optString("nonce")
         if (nonce.isEmpty()) return
+
+        // E1/1.3 — PIN OBLIGATORIO, sin TOFU. La identidad del relevo NO se
+        // toma del challenge: se compara contra la fijada en la configuracion.
+        // Si no hay pin valido, o el challenge anuncia una identidad distinta,
+        // se rechaza ANTES de firmar: no se construye ni se firma transcript
+        // alguno, y la identidad anunciada jamas se adopta.
+        val announced = json.optString("responderIdentityId")
+        val acceptedPin = RelayIdentityPin.acceptedPinFor(pinnedRelayIdentityId, announced)
+        if (acceptedPin == null) {
+            LogBuffer.log(
+                RELAY_LOG_TAG,
+                "AUTH_CHALLENGE rechazado: identidad de relevo anunciada " +
+                    "'${announced.ifEmpty { "<ausente>" }}' no coincide con la fijada " +
+                    "'${pinnedRelayIdentityId ?: "<ninguna>"}': no se firma",
+            )
+            rejectAuthentication()
+            return
+        }
+
         expectedServerNonce = nonce
 
-        val signature = computeAuthSignature(nonce, json.optLong("timestamp"))
+        // El transcript se firma con la identidad FIJADA (== la del challenge,
+        // ya comprobada): 16 + 8 + 64 + 64 = 152 B (KM-0002 §9.2), sin cambio de
+        // protocolo.
+        val signature = computeAuthSignature(nonce, json.optLong("timestamp"), acceptedPin)
 
         val msg = JSONObject().apply {
             put("type", "AUTH_RESPONSE")
@@ -411,10 +453,28 @@ class RelayClient(
         ackHandlers.forEach { it(bytes) }
     }
 
-    private fun computeAuthSignature(nonce: String, timestamp: Long): String {
+    /**
+     * Rechazo seguro de la autenticacion. Cierra el socket y deja el transporte
+     * en `DISCONNECTED` SIN reconectar.
+     *
+     * Un pin ausente/erroneo o un challenge que no lo reproduce es un error de
+     * CONFIGURACION: reintentar no lo arregla, y adoptar la identidad anunciada
+     * seria TOFU. Este metodo no firma ni acepta ningun transcript.
+     */
+    private fun rejectAuthentication() {
+        webSocket?.close(1000, "autenticacion rechazada: identidad de relevo no fijada")
+        webSocket = null
+        setState(ConnectionState.DISCONNECTED)
+    }
+
+    private fun computeAuthSignature(
+        nonce: String,
+        timestamp: Long,
+        responderIdentityId: String,
+    ): String {
         val nonceBytes = java.util.Base64.getUrlDecoder().decode(nonce)
         val tsBytes = ByteBuffer.allocate(8).putLong(timestamp).array()
-        val relayIdBytes = relayIdentityId.value.toByteArray(Charsets.US_ASCII)
+        val relayIdBytes = responderIdentityId.toByteArray(Charsets.US_ASCII)
         val identityBytes = localIdentity.value.toByteArray(Charsets.US_ASCII)
 
         val transcript = ByteArrayOutputStream().apply {

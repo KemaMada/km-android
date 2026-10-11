@@ -71,6 +71,17 @@ android {
         // sin recompilar. El override tiene precedencia sobre este valor; ver
         // RelayEndpoint.
         buildConfigField("String", "RELAY_WS_URL", "\"ws://10.0.2.2:8080/ws\"")
+
+        // E1/1.3: identidad del relevo FIJADA (pin). Igual que la URL, SOLO es
+        // el default de desarrollo (el daemon local); el relevo real se fija en
+        // runtime con `adb shell settings put global km_relay_identity ...`. El
+        // override tiene precedencia y se valida (64 hex minusculas); sin pin
+        // valido el transporte NO autentica. Ver RelayIdentityPin.
+        buildConfigField(
+            "String",
+            "RELAY_IDENTITY",
+            "\"cadd3afc301de94d9161ce7834b8c6b6396d49dd529a830269dfcc09c4cda590\"",
+        )
     }
 
     signingConfigs {

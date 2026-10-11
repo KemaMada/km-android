@@ -43,10 +43,13 @@ class AppContainer(application: Application) {
     val offlineQueue = RoomOfflineQueue(database.offlineQueueDao())
     val duplicateStore = RoomDuplicateStore(database.duplicateDao())
 
-    // Identidad del rele, en el MISMO espacio de identificadores que
-    // localIdentity: 64 hex. Un literal de 40 hex aqui hace que el transcript
-    // de autenticacion no cumpla 16 + 8 + 64 + 64.
-    val relayIdentityId = IdentityId("cadd3afc301de94d9161ce7834b8c6b6396d49dd529a830269dfcc09c4cda590")
+    // E1/1.3. La identidad del relevo se FIJA (pin), no se adopta del
+    // AUTH_CHALLENGE. El default de desarrollo vive en BuildConfig y un telefono
+    // fisico apunta al relevo real en runtime con
+    // `settings put global km_relay_identity ...`, sin recompilar. La resolucion
+    // valida 64 hex minusculas; sin valor valido el transporte NO autentica
+    // (rechazo seguro, sin TOFU). Ver RelayIdentityPin.
+    val relayIdentityId: String? = RelayIdentityPin.resolve(application.contentResolver)
 
     /**
      * Claves de FIRMA de los peers conocidos, por `identityId`.
@@ -87,7 +90,7 @@ class AppContainer(application: Application) {
         localIdentity = localIdentity,
         localPrivateKey = keyPair.privateKey,
         localPublicKey = keyPair.publicKey,
-        relayIdentityId = relayIdentityId,
+        pinnedRelayIdentityId = relayIdentityId,
         ed25519 = ed25519
     )
 
@@ -142,6 +145,15 @@ class AppContainer(application: Application) {
         // Deja constancia del endpoint efectivo (override de runtime o default):
         // es lo que un test adb lee para confirmar S3a/S3b sin ambiguedad.
         LogBuffer.log("RELAY", "endpoint resuelto: $relayUrl")
+
+        // E1/1.3: identidad de relevo FIJADA (override o default), o el aviso de
+        // rechazo seguro si no hay ninguna valida. Nunca es la identidad que el
+        // relevo anuncie: es la que decide la configuracion local.
+        LogBuffer.log(
+            "RELAY",
+            "identidad de relevo fijada: " +
+                (relayIdentityId ?: "NINGUNA (rechazo seguro, no se autentica)"),
+        )
 
         // R7/2.8: identidad, endpoint y estado inicial en la superficie de
         // depuracion. Las transiciones posteriores las empuja el handler de

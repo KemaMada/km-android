@@ -49,7 +49,7 @@ class RelayDataResidualPathsTest {
         Site(
             file = RELAY_CLIENT,
             function = "computeAuthSignature",
-            line = "val relayIdBytes = relayIdentityId.value.toByteArray(Charsets.US_ASCII)",
+            line = "val relayIdBytes = responderIdentityId.toByteArray(Charsets.US_ASCII)",
             why = "TEXTO -> BYTES, no al reves, y en US_ASCII explicito: arma el transcript canonico de 152 B (§9.5).",
         ),
         Site(
