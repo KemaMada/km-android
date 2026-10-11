@@ -31,7 +31,9 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.example.keymessage.ContactIdentity
 import com.example.keymessage.KeyMessageApp
+import com.example.keymessage.PEER_KEY_LOG_TAG
 import com.example.keymessage.data.ConversationRepository
 import com.example.keymessage.model.AppState
 import com.example.keymessage.model.Contact
@@ -71,7 +73,9 @@ class MainActivity : ComponentActivity() {
             android.util.Log.e("KeyMessage", "Uncaught on ${t.name}", e)
         }
         appState = AppState(this)
-        chatManager = ChatManager(appState, applicationContext)
+        chatManager = ChatManager(appState, applicationContext) { relayId, base64Key ->
+            (applicationContext as KeyMessageApp).container.registerPeerKey(relayId, base64Key)
+        }
         chatManager.connect()
 
         setContent {
@@ -87,17 +91,41 @@ class MainActivity : ComponentActivity() {
                             localIdentity = app.container.localIdentity
                         )
                     }
-                    // Placeholder de UI: mismo espacio de identificadores que
-                    // IdentityId (64 hex, KM-ID-0001 seccion 6). Un literal de
-                    // 40 hex aqui entra en el transcript de autenticacion como
-                    // `identityId` y rompe la disposicion 16 + 8 + 64 + 64.
-                    val peerId = remember { com.km.model.IdentityId("b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0") }
-                    val vm: com.example.keymessage.ui.ConversationViewModel = viewModel(
-                        factory = com.example.keymessage.ui.ConversationViewModel.Factory(repo, app.container.core, peerId, "Test Peer")
+                    // 2.2/D1: el destinatario sale de un CONTACTO REAL guardado,
+                    // nunca de un literal. El `IdentityId` de relevo se deriva de
+                    // la clave publica del contacto (KM-ID-0001 seccion 6), igual
+                    // que `PeerKeyDirectory` hace en el escritorio; el VM solo se
+                    // construye cuando hay contacto seleccionado con clave valida,
+                    // y sin el no hay forma de enviar (el picker lo bloquea).
+                    val contactVersion by appState.contactListVersion.collectAsState()
+                    val contacts = remember(contactVersion) { appState.getContacts() }
+                    var selectedContactId by remember { mutableStateOf<String?>(null) }
+                    val selected = contacts.find { it.id == selectedContactId }
+                    val vm: com.example.keymessage.ui.ConversationViewModel? = selected?.let { contact ->
+                        ContactIdentity.identityIdOf(contact.publicKey)?.let { relayId ->
+                            // 2.4/D3: MainActivity entrega el estado de conexion
+                            // VIVO del contenedor; abajo se recolecta.
+                            viewModel(
+                                key = relayId.value,
+                                factory = com.example.keymessage.ui.ConversationViewModel.Factory(
+                                    repo, app.container.core, relayId, contact.name, app.container.connectionState
+                                )
+                            )
+                        }
+                    }
+                    NewChatScreen(
+                        contacts = contacts,
+                        onSelect = { id -> selectedContactId = id },
+                        viewModel = vm
                     )
-                    NewChatScreen(viewModel = vm)
                 } else {
-                    MainUI(appState, chatManager, onScanQR = { launchScanner() }) { showNewChat.value = true }
+                    MainUI(
+                        appState,
+                        chatManager,
+                        onScanQR = { launchScanner() },
+                        onNewChat = { showNewChat.value = true },
+                        registerContactKey = ::registerContactPeerKey,
+                    )
                 }
             }
         }
@@ -110,12 +138,39 @@ class MainActivity : ComponentActivity() {
             val pubKey = parts[1]
             val nodeId = DhtNode.hashNodeId(pubKey)
             appState.addContact(Contact(id = nodeId, name = name, publicKey = pubKey))
+            registerContactPeerKey(name, pubKey)
             val myName = appState.identity.displayName.ifEmpty { "User" }
             chatManager.sendContactExchange(nodeId, myName, appState.identity.publicKey)
             Toast.makeText(this, "Contact added: $name", Toast.LENGTH_SHORT).show()
         } else {
             Toast.makeText(this, "Invalid QR", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    /**
+     * 2.1/D2: registra la clave de firma Ed25519 de un contacto al darlo de alta.
+     *
+     * El `IdentityId` de relevo se deriva de la clave publica del contacto
+     * (`ContactIdentity.identityIdOf`), exactamente el par que `PeerKeyDirectory`
+     * del escritorio exige que sea coherente antes de guardar. Un contacto sin
+     * clave Ed25519 valida se LOGUEA y se salta (R2): nunca se registra basura
+     * en `km_peers`, porque una clave inventada autenticaria ACKs contra una
+     * identidad equivocada.
+     */
+    private fun registerContactPeerKey(name: String, base64PublicKey: String) {
+        val relayId = ContactIdentity.identityIdOf(base64PublicKey)
+        if (relayId == null) {
+            LogBuffer.log(
+                PEER_KEY_LOG_TAG,
+                "contacto $name sin clave Ed25519 valida: NO se registra clave de firma",
+            )
+            return
+        }
+        (application as KeyMessageApp).container.registerPeerKey(relayId, base64PublicKey)
+        LogBuffer.log(
+            PEER_KEY_LOG_TAG,
+            "clave de firma registrada para $name (${relayId.value.take(8)}...)",
+        )
     }
 
     private fun launchScanner() {
@@ -133,7 +188,13 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun MainUI(appState: AppState, chatManager: ChatManager, onScanQR: () -> Unit, onNewChat: () -> Unit = {}) {
+fun MainUI(
+    appState: AppState,
+    chatManager: ChatManager,
+    onScanQR: () -> Unit,
+    onNewChat: () -> Unit,
+    registerContactKey: (String, String) -> Unit,
+) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
     var drawerOpen by remember { mutableStateOf(false) }
@@ -305,6 +366,9 @@ fun MainUI(appState: AppState, chatManager: ChatManager, onScanQR: () -> Unit, o
                 val pub = parts.getOrElse(1) { keyIn.trim() }
                 val id = DhtNode.hashNodeId(pub)
                 appState.addContact(Contact(id = id, name = name, publicKey = pub))
+                // 2.1/D2: se registra la clave de firma del contacto en el alta,
+                // igual que en el camino QR, para que sus ACK se verifiquen.
+                registerContactKey(name, pub)
                 chatManager.sendContactExchange(id, appState.identity.displayName.ifEmpty { "User" }, appState.identity.publicKey)
                 refresh()
                 showKeyDialog = false

@@ -13,14 +13,25 @@ import org.json.JSONObject
 import com.example.keymessage.model.ChatMessage
 import com.example.keymessage.model.MessageStatus
 import com.example.keymessage.model.AppState
+import com.example.keymessage.ContactIdentity
+import com.example.keymessage.PEER_KEY_LOG_TAG
 import com.example.keymessage.network.dht.DhtNode
 import com.example.keymessage.crypto.Crypto
 import com.example.keymessage.util.LogBuffer
+import com.km.model.IdentityId
 import java.util.concurrent.TimeUnit
 
 class ChatManager(
     private val appState: AppState,
-    private val context: Context
+    private val context: Context,
+    /**
+     * 2.1/D2. Registra la clave de firma Ed25519 de un contacto (Base64 estandar,
+     * derivando su `IdentityId` de 64 hex como `PeerKeyDirectory` del escritorio)
+     * para que el `peerPublicKeyResolver` del core verifique los `ACK` entrantes
+     * de ese peer. La inyecta `MainActivity` con el contenedor real de la app;
+     * un contacto sin clave valida se loguea y se salta, nunca se registra basura.
+     */
+    private val registerPeerKey: (IdentityId, String) -> Unit,
 ) {
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var webSocket: WebSocket? = null
@@ -324,6 +335,14 @@ class ChatManager(
         if (appState.getContacts().none { it.id == fromNodeId }) {
             appState.addContact(com.example.keymessage.model.Contact(
                 id = fromNodeId, name = fromNodeId.take(12), publicKey = ""))
+            // 2.1/D2: contacto auto-anadido SIN clave publica (llego por el canal
+            // legacy, no por un ContactBundle). Sin clave no hay IdentityId de
+            // relevo que registrar, y registrar basura seria peor que no
+            // registrar: se loguea el salto (R2) y no se toca km_peers.
+            LogBuffer.log(
+                PEER_KEY_LOG_TAG,
+                "contacto auto-anadido ${fromNodeId.take(12)} sin clave publica: no se registra clave de firma",
+            )
         }
 
         val msg = ChatMessage(id = msgId, senderId = fromNodeId, receiverId = myNodeId,
@@ -340,11 +359,41 @@ class ChatManager(
                 appState.addContact(com.example.keymessage.model.Contact(
                     id = senderNodeId, name = parts[0], publicKey = parts[1]))
                 LogBuffer.log("CONTACT", "Auto-added ${parts[0]}")
+                registerContactPeerKey(parts[0], parts[1])
             }
             if (senderNodeId in _onlineUsers.value) {
                 onPeerOnline(senderNodeId)
             }
         }
+    }
+
+    /**
+     * 2.1/D2. Registra la clave de firma del contacto recien anadido.
+     *
+     * El `IdentityId` de relevo se DERIVA de la clave publica del contacto
+     * (`ContactIdentity.identityIdOf`), igual que `PeerKeyDirectory.register`
+     * comprueba en el escritorio que `identityId = SHA-256("KM-ID-IDENTITY" ||
+     * clave)`. El id de 40 hex de `DhtNode.hashNodeId` es el espacio legacy y
+     * NO llega aqui: el sobre habla 64 hex.
+     *
+     * Contactos sin clave Ed25519 valida (o sin clave) se loguean y se saltan:
+     * R2 prohibe desactivar la verificacion de ACK en silencio, y registrar una
+     * clave inventada autenticaria ACKs contra una identidad equivocada.
+     */
+    private fun registerContactPeerKey(name: String, base64PublicKey: String) {
+        val relayId = ContactIdentity.identityIdOf(base64PublicKey)
+        if (relayId == null) {
+            LogBuffer.log(
+                PEER_KEY_LOG_TAG,
+                "contacto $name sin clave Ed25519 valida: NO se registra clave de firma",
+            )
+            return
+        }
+        registerPeerKey(relayId, base64PublicKey)
+        LogBuffer.log(
+            PEER_KEY_LOG_TAG,
+            "clave de firma registrada para $name (${relayId.value.take(8)}...)",
+        )
     }
 
     private fun retryQueuedMessages(targetNodeId: String) {
