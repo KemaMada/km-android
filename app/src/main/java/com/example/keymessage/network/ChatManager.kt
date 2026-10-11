@@ -152,10 +152,21 @@ class ChatManager(
             override fun onMessage(webSocket: WebSocket, text: String) = handleWsMsg(text)
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
                 _connectionStatus.value = false; _onlineUsers.value = emptySet()
+                // R5/S9/2.6: el cierre del WebSocket de senalizacion (3001)
+                // estaba MUDO. Es exactamente lo que hacia invisible un endpoint
+                // muerto: la app solo reconectaba en bucle. Se registran codigo
+                // y razon, que el servidor manda en el close frame; nunca el
+                // texto de un frame (podria llevar SDP/ICE).
+                LogBuffer.log("SIG", "signaling socket closed: code=$code reason=$reason")
                 if (ws === webSocket) scheduleReconnect(ws)
             }
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
                 _connectionStatus.value = false; _onlineUsers.value = emptySet()
+                // R5/S9/2.6: la excepcion de red tambien estaba muda. Se
+                // registran clase y mensaje (`ConnectException`,
+                // `SocketTimeoutException`, `EOFException`); describen el
+                // transporte, no el contenido.
+                LogBuffer.log("SIG", "signaling socket failure: ${t.javaClass.simpleName}: ${t.message}")
                 if (ws === webSocket) scheduleReconnect(ws)
             }
         })
@@ -464,6 +475,10 @@ class ChatManager(
                     LogBuffer.log("SIG", "Ignoring stale reconnect")
                     return@launch
                 }
+                // R5/S9/2.6: cada reintento queda registrado con su espera.
+                // Antes los reintentos eran invisibles y un backoff en curso se
+                // confundia con "no pasa nada".
+                LogBuffer.log("SIG", "reconnect attempt after ${reconnectDelay}ms")
                 reconnectDelay = (reconnectDelay * 2).coerceAtMost(60_000L)
                 connect()
             } catch (_: Exception) {}

@@ -1,5 +1,6 @@
 package com.example.keymessage.network
 
+import com.example.keymessage.util.LogBuffer
 import com.km.crypto.Ed25519
 import com.km.codec.JsonDecoder
 import com.km.codec.JsonRelayControlCodec
@@ -19,6 +20,12 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+
+/** Etiqueta de `LogBuffer` para los sucesos de vida/fallo del relé. R5/2.7. */
+internal const val RELAY_LOG_TAG: String = "RELAY"
+
+/** Etiqueta de `LogBuffer` para la presencia del relé. R4/S4/2.5. */
+internal const val PEER_ONLINE_LOG_TAG: String = "PEER_ONLINE"
 
 class RelayClient(
     private val url: String,
@@ -163,6 +170,10 @@ class RelayClient(
     }
 
     private fun openConnection() {
+        // R5/2.7: el endpoint efectivo queda en el log. Sin esto, un fallo de
+        // conexion no dice CONTRA QUIEN iba, y un retarget de runtime mal
+        // escrito es indistinguible de un relé caido. Nunca lleva payload.
+        LogBuffer.log(RELAY_LOG_TAG, "conectando a $url")
         val request = Request.Builder().url(url).build()
         webSocket = client.newWebSocket(request, RelayWebSocketListener())
     }
@@ -212,15 +223,28 @@ class RelayClient(
         }
     }
 
-    private fun onWebSocketClosed(normal: Boolean) {
-        if (normal) {
+    private fun onWebSocketClosed(code: Int, reason: String) {
+        if (code == 1000) {
+            LogBuffer.log(RELAY_LOG_TAG, "socket cerrado (normal): code=$code reason=$reason")
             setState(ConnectionState.DISCONNECTED)
             return
         }
+        // R5/2.7: un cierre anormal es un fallo tanto como un `onFailure`. Sin
+        // esta linea, un 1006 (sin close frame) o un 4xxx del relé quedaban
+        // invisibles: la app reconectaba en bucle sin decir por que.
+        LogBuffer.log(RELAY_LOG_TAG, "socket cerrado: code=$code reason=$reason -> reconexion")
         scheduleReconnect()
     }
 
-    private fun onWebSocketFailure() {
+    private fun onWebSocketFailure(t: Throwable, response: Response?) {
+        // R5/2.7: se registra la CLASE y el MENSAJE de la excepcion. El mensaje
+        // de un fallo de red (`ConnectException`, `SocketTimeoutException`,
+        // `EOFException`) describe el transporte, nunca el payload ni el
+        // plaintext: aqui no se toca ningun `ByteArray` de aplicacion.
+        LogBuffer.log(
+            RELAY_LOG_TAG,
+            "fallo de socket: ${t.javaClass.simpleName}: ${t.message}",
+        )
         scheduleReconnect()
     }
 
@@ -288,12 +312,22 @@ class RelayClient(
     private fun handleAuthFail(json: JSONObject) {
         val errorCode = json.optString("errorCode")
         val errorMessage = json.optString("errorMessage")
+        // R5/2.7: el relé ya explicaba el rechazo en `errorCode`/`errorMessage`
+        // y la app los tiraba a la basura. Un `AUTH_FAIL` por firma o por
+        // identidad no es "un cierre": es el relé diciendo que algo del
+        // handshake esta mal, y eso solo se puede diagnosticar si se registra.
+        LogBuffer.log(RELAY_LOG_TAG, "AUTH_FAIL del relevo: errorCode=$errorCode errorMessage=$errorMessage")
         setState(ConnectionState.DISCONNECTED)
         scheduleReconnect()
     }
 
     private fun handlePeerOnline(json: JSONObject) {
         val peerId = IdentityId(json.optString("identityId"))
+        // R4/S4/2.5: la presencia del relé se registra con el `IdentityId` de
+        // 64 hex del peer. Es lo que hace que S4 sea afirmable desde la app (no
+        // solo desde el relé/escritorio) al leer el Debug Log. El `IdentityId`
+        // es publico; nunca se registra nada del sobre.
+        LogBuffer.log(PEER_ONLINE_LOG_TAG, "peer en linea: ${peerId.value}")
         peerOnlineHandlers.forEach { it(peerId) }
     }
 
@@ -408,15 +442,15 @@ class RelayClient(
         }
 
         override fun onClosing(ws: WebSocket, code: Int, reason: String) {
-            onWebSocketClosed(code == 1000)
+            onWebSocketClosed(code, reason)
         }
 
         override fun onClosed(ws: WebSocket, code: Int, reason: String) {
-            onWebSocketClosed(code == 1000)
+            onWebSocketClosed(code, reason)
         }
 
         override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
-            onWebSocketFailure()
+            onWebSocketFailure(t, response)
         }
     }
 }

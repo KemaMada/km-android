@@ -7,6 +7,7 @@ import com.example.keymessage.storage.room.database.KeyMessageDatabase
 import com.example.keymessage.storage.room.impl.RoomDuplicateStore
 import com.example.keymessage.storage.room.impl.RoomMessageStore
 import com.example.keymessage.storage.room.impl.RoomOfflineQueue
+import com.example.keymessage.util.DebugSurface
 import com.example.keymessage.util.LogBuffer
 import com.km.api.KeyMessageCoreImpl
 import com.km.crypto.Ed25519Impl
@@ -105,9 +106,13 @@ class AppContainer(application: Application) {
      */
     val connectionState: StateFlow<ConnectionState> =
         MutableStateFlow(transport.connectionState()).also { flow ->
-            transport.onStateChange { state -> flow.value = state }
+            // R7/2.8: cada transicion del transporte se publica tambien en la
+            // superficie de depuracion, para que `adb` la lea sin UI.
+            transport.onStateChange { state ->
+                flow.value = state
+                DebugSurface.setConnectionState(state.name)
+            }
         }.asStateFlow()
-
     val core = KeyMessageCoreImpl(
         localIdentity = localIdentity,
         localPrivateKey = keyPair.privateKey,
@@ -137,6 +142,13 @@ class AppContainer(application: Application) {
         // Deja constancia del endpoint efectivo (override de runtime o default):
         // es lo que un test adb lee para confirmar S3a/S3b sin ambiguedad.
         LogBuffer.log("RELAY", "endpoint resuelto: $relayUrl")
+
+        // R7/2.8: identidad, endpoint y estado inicial en la superficie de
+        // depuracion. Las transiciones posteriores las empuja el handler de
+        // `connectionState`; el envio/recepcion los registra el repositorio.
+        DebugSurface.setIdentityId(localIdentity.value)
+        DebugSurface.setRelayEndpoint(relayUrl)
+        DebugSurface.setConnectionState(transport.connectionState().name)
 
         // NI6: STORED is custody confirmation, never authorization to delete the local copy.
         transport.setStoredHandler { receipt ->
