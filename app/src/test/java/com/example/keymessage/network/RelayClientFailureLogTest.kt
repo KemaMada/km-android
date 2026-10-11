@@ -74,6 +74,8 @@ class RelayClientFailureLogTest {
 
     private fun authChallenge(): String = JSONObject().apply {
         put("type", "AUTH_CHALLENGE")
+        // task 1.1: el challenge SI lleva dialecto (string); el cliente lo exige.
+        put("protocolVersion", "2.0")
         put("messageId", UUID.randomUUID().toString())
         put("timestamp", challengeTimestamp)
         put("nonce", Base64.getUrlEncoder().withoutPadding().encodeToString(challengeNonce))

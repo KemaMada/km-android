@@ -2,6 +2,9 @@ package com.example.keymessage.network
 
 import com.example.keymessage.RelayIdentityPin
 import com.example.keymessage.util.LogBuffer
+import com.km.auth.Dialect
+import com.km.auth.DialectCheck
+import com.km.auth.DialectNegotiation
 import com.km.crypto.Ed25519
 import com.km.codec.JsonDecoder
 import com.km.codec.JsonRelayControlCodec
@@ -27,6 +30,15 @@ internal const val RELAY_LOG_TAG: String = "RELAY"
 
 /** Etiqueta de `LogBuffer` para la presencia del relé. R4/S4/2.5. */
 internal const val PEER_ONLINE_LOG_TAG: String = "PEER_ONLINE"
+
+/**
+ * El UNICO dialecto que implementa este cliente (task 1.1, N7).
+ *
+ * Se declara en el `AUTH_REQUEST` y se EXIGE en `AUTH_CHALLENGE` y `AUTH_OK`.
+ * Cualquier otra confirmacion, o su ausencia, rechaza el handshake: nunca se
+ * adopta el dialecto del relevo ni se baja de dialecto en silencio.
+ */
+internal val CLIENT_DIALECT: Dialect = Dialect.V2_0
 
 class RelayClient(
     private val url: String,
@@ -64,6 +76,11 @@ class RelayClient(
 
     private var sessionId: String? = null
     private var expectedServerNonce: String? = null
+    /**
+     * Dialecto confirmado por el `AUTH_CHALLENGE` de ESTE handshake. El `AUTH_OK`
+     * debe confirmar el mismo; si no, se rechaza y nunca se pasa a ONLINE.
+     */
+    private var challengeDialect: Dialect? = null
 
     override fun connect(): Result<Unit> = runCatching {
         // E1/1.3 — pin OBLIGATORIO. Sin una identidad de relevo fijada y valida
@@ -287,6 +304,8 @@ class RelayClient(
     }
 
     private fun sendAuthRequest() {
+        // Handshake nuevo: aun no hay dialecto confirmado por el challenge.
+        challengeDialect = null
         // El pin ya se valido en `connect()`; aqui solo se declara. Es la
         // MISMA identidad que la del transcript: el contrato de AUTH_REQUEST no
         // cambia (se sigue enviando `responderIdentityId`).
@@ -295,7 +314,7 @@ class RelayClient(
             put("type", "AUTH_REQUEST")
             put("messageId", UUID.randomUUID().toString())
             put("timestamp", System.currentTimeMillis())
-            put("protocolVersion", "2.0")
+            put("protocolVersion", CLIENT_DIALECT.wire)
             put("identityId", localIdentity.value)
             put("publicKey", publicKeyBase64())
             put("responderIdentityId", pin)
@@ -309,6 +328,21 @@ class RelayClient(
     private fun handleAuthChallenge(json: JSONObject) {
         val nonce = json.optString("nonce")
         if (nonce.isEmpty()) return
+
+        // DIALECTO PRIMERO (task 1.1): un challenge sin `protocolVersion`, con
+        // uno del tipo equivocado, desconocido o no implementado se rechaza
+        // ANTES de firmar. El dialecto del relevo NUNCA se adopta.
+        when (val check = DialectNegotiation.checkChallenge(CLIENT_DIALECT, protocolVersionOrNull(json))) {
+            is DialectCheck.Rejected -> {
+                LogBuffer.log(
+                    RELAY_LOG_TAG,
+                    "AUTH_CHALLENGE rechazado: ${check.error.wireCode} (${check.detail}): no se firma",
+                )
+                rejectAuthentication()
+                return
+            }
+            is DialectCheck.Accepted -> challengeDialect = check.dialect
+        }
 
         // E1/1.3 — PIN OBLIGATORIO, sin TOFU. La identidad del relevo NO se
         // toma del challenge: se compara contra la fijada en la configuracion.
@@ -345,10 +379,40 @@ class RelayClient(
     }
 
     private fun handleAuthOk(json: JSONObject) {
+        // DIALECTO antes que nada (task 1.1): un `AUTH_OK` que no confirme el
+        // MISMO dialecto del challenge (o que no lo lleve) no pasa a ONLINE.
+        val confirmed = challengeDialect
+        if (confirmed == null) {
+            LogBuffer.log(RELAY_LOG_TAG, "AUTH_OK sin dialecto confirmado en el challenge: rechazado")
+            rejectAuthentication()
+            return
+        }
+        when (val check = DialectNegotiation.checkAuthOk(CLIENT_DIALECT, confirmed, protocolVersionOrNull(json))) {
+            is DialectCheck.Rejected -> {
+                LogBuffer.log(
+                    RELAY_LOG_TAG,
+                    "AUTH_OK rechazado: ${check.error.wireCode} (${check.detail}): nunca ONLINE",
+                )
+                rejectAuthentication()
+                return
+            }
+            is DialectCheck.Accepted -> Unit
+        }
+
         sessionId = json.optString("sessionId")
         setState(ConnectionState.ONLINE)
         reconnectAttempt = 0
         drainPendingMessages()
+    }
+
+    /**
+     * `protocolVersion` como string, o `null` si falta o NO es string (R34:
+     * un numero no es un dialecto valido; cuenta como estructuralmente
+     * malformado, igual que su ausencia).
+     */
+    private fun protocolVersionOrNull(json: JSONObject): String? {
+        val raw = json.opt("protocolVersion")
+        return raw as? String
     }
 
     private fun handleAuthFail(json: JSONObject) {

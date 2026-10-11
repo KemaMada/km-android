@@ -23,6 +23,7 @@ import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -78,6 +79,17 @@ class RelayClientWireTest {
 
     private lateinit var keyPair: KeyPair
 
+    /**
+     * Dialecto (o valor crudo) que el rele simulado devuelve en el challenge y
+     * en el AUTH_OK. `null` = campo AUSENTE; un `Int` = tipo equivocado. Por
+     * defecto "2.0", el dialecto que el cliente implementa.
+     */
+    @Volatile
+    private var challengeDialectProbe: Any? = "2.0"
+
+    @Volatile
+    private var authOkDialectProbe: Any? = "2.0"
+
     // =====================================================================
     // Relé simulado: habla dialecto B y no sabe nada de SecureFrame
     // =====================================================================
@@ -107,6 +119,8 @@ class RelayClientWireTest {
 
     private fun authChallenge(): String = JSONObject().apply {
         put("type", "AUTH_CHALLENGE")
+        // task 1.1: el challenge SI lleva dialecto (string); el cliente lo exige.
+        challengeDialectProbe?.let { put("protocolVersion", it) }
         put("messageId", UUID.randomUUID().toString())
         put("timestamp", challengeTimestamp)
         put("nonce", Base64.getUrlEncoder().withoutPadding().encodeToString(challengeNonce))
@@ -117,7 +131,7 @@ class RelayClientWireTest {
         put("type", "AUTH_OK")
         put("messageId", UUID.randomUUID().toString())
         put("timestamp", challengeTimestamp + 2)
-        put("protocolVersion", "2.0")
+        authOkDialectProbe?.let { put("protocolVersion", it) }
         put("identityId", aliceId.value)
         put("responderIdentityId", relayId.value)
         put("sessionId", UUID.randomUUID().toString())
@@ -459,12 +473,107 @@ class RelayClientWireTest {
     }
 
     // =====================================================================
+    // Task 1.1 — dialecto en la direccion de respuesta
+    //
+    // El cliente declara UN dialecto (2.0) y EXIGE esa confirmacion en el
+    // challenge y en el AUTH_OK. Ausente, desconocido o inconsistente: rechazo
+    // sin firmar y NUNCA ONLINE.
+    // =====================================================================
+
+    @Test
+    fun `el AUTH_REQUEST declara el dialecto como string`() {
+        connectOnline()
+        val request = awaitFrame("AUTH_REQUEST")
+        assertTrue(
+            "protocolVersion debe ser string (R34), no numero",
+            request.opt("protocolVersion") is String,
+        )
+        assertEquals("2.0", request.getString("protocolVersion"))
+    }
+
+    @Test
+    fun `un challenge sin protocolVersion se rechaza sin firmar y nunca ONLINE`() {
+        challengeDialectProbe = null
+        client.connect().getOrThrow()
+        awaitFrame("AUTH_REQUEST")
+        Thread.sleep(800)
+        assertTrue(
+            "no puede salir AUTH_RESPONSE con un challenge sin dialecto",
+            framesUntil("AUTH_RESPONSE").isEmpty(),
+        )
+        assertEquals(ConnectionState.DISCONNECTED, client.connectionState())
+        assertFalse("nunca ONLINE tras un dialecto ausente", online.await(300, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
+    fun `un challenge con dialecto desconocido se rechaza sin firmar`() {
+        challengeDialectProbe = "9.9"
+        client.connect().getOrThrow()
+        awaitFrame("AUTH_REQUEST")
+        Thread.sleep(800)
+        assertTrue(framesUntil("AUTH_RESPONSE").isEmpty())
+        assertEquals(ConnectionState.DISCONNECTED, client.connectionState())
+    }
+
+    @Test
+    fun `un protocolVersion numerico en el challenge se trata como malformado`() {
+        challengeDialectProbe = 20 // numero: R34 lo prohibe
+        client.connect().getOrThrow()
+        awaitFrame("AUTH_REQUEST")
+        Thread.sleep(800)
+        assertTrue(framesUntil("AUTH_RESPONSE").isEmpty())
+        assertEquals(ConnectionState.DISCONNECTED, client.connectionState())
+    }
+
+    @Test
+    fun `un challenge 2_1 se rechaza en un cliente que solo implementa 2_0`() {
+        challengeDialectProbe = "2.1"
+        client.connect().getOrThrow()
+        awaitFrame("AUTH_REQUEST")
+        Thread.sleep(800)
+        assertTrue(framesUntil("AUTH_RESPONSE").isEmpty())
+        assertEquals(ConnectionState.DISCONNECTED, client.connectionState())
+    }
+
+    @Test
+    fun `un AUTH_OK inconsistente con el challenge se rechaza y nunca ONLINE`() {
+        challengeDialectProbe = "2.0"
+        authOkDialectProbe = "2.1" // mezcla de dialectos en un mismo handshake
+        client.connect().getOrThrow()
+        awaitFrame("AUTH_REQUEST")
+        Thread.sleep(800)
+        assertFalse("nunca ONLINE con un AUTH_OK inconsistente", online.await(300, TimeUnit.MILLISECONDS))
+        assertEquals(ConnectionState.DISCONNECTED, client.connectionState())
+    }
+
+    @Test
+    fun `un AUTH_OK sin protocolVersion se rechaza y nunca ONLINE`() {
+        challengeDialectProbe = "2.0"
+        authOkDialectProbe = null
+        client.connect().getOrThrow()
+        awaitFrame("AUTH_REQUEST")
+        Thread.sleep(800)
+        assertFalse("nunca ONLINE con un AUTH_OK sin dialecto", online.await(300, TimeUnit.MILLISECONDS))
+    }
+
+    // =====================================================================
     // Utilidades
     // =====================================================================
 
+    /** Frames del cliente con el `type` dado, recolectados durante una ventana. */
+    private fun framesUntil(type: String, windowMs: Long = 700): List<JSONObject> {
+        val out = mutableListOf<JSONObject>()
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(windowMs)
+        while (System.nanoTime() < deadline) {
+            val frame = framesFromClient.poll(100, TimeUnit.MILLISECONDS) ?: continue
+            val json = JSONObject(frame)
+            if (json.optString("type") == type) out.add(json)
+        }
+        return out
+    }
+
     /** 44 B de cabecera de SecureFrame, con contenido no constante y no UTF-8. */
-    private fun payload44(): ByteArray = BinarySecureFrameCodec.authenticatedHeader(
-        type = FrameType.MESSAGE,
+    private fun payload44(): ByteArray = BinarySecureFrameCodec.authenticatedHeader(        type = FrameType.MESSAGE,
         ratchetHeader = RatchetHeader(
             dhPublicKey = ByteArray(32) { ((it + 3) * 37 + 11).toByte() },
             previousChainLength = 4u,
