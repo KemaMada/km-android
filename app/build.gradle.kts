@@ -63,6 +63,14 @@ android {
         versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // E3/1.1: endpoint del relevo WebSocket. SOLO es el valor por defecto
+        // en tiempo de compilacion: el emulador lo alcanza por su loopback
+        // (10.0.2.2 = host). Un telefono fisico lo retargetea en tiempo de
+        // ejecucion con `adb shell settings put global km_relay_ws_url ...`,
+        // sin recompilar. El override tiene precedencia sobre este valor; ver
+        // RelayEndpoint.
+        buildConfigField("String", "RELAY_WS_URL", "\"ws://10.0.2.2:8080/ws\"")
     }
 
     signingConfigs {
@@ -105,6 +113,10 @@ android {
 
     buildFeatures {
         compose = true
+        // Necesario para `buildConfigField`: sin esta bandera AGP no genera la
+        // clase BuildConfig y RELAY_WS_URL no existiria. Es el unico uso de
+        // BuildConfig en el modulo.
+        buildConfig = true
     }
 
     // No `composeOptions.kotlinCompilerExtensionVersion`: with Kotlin 2.x the
