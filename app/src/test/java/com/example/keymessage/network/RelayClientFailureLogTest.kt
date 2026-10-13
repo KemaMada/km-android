@@ -87,7 +87,7 @@ class RelayClientFailureLogTest {
         put("messageId", UUID.randomUUID().toString())
         put("timestamp", challengeTimestamp + 2)
         put("protocolVersion", "2.0")
-        put("identityId", aliceId.value)
+        put("initiatorIdentityId", aliceId.value)
         put("responderIdentityId", relayId.value)
         put("sessionId", UUID.randomUUID().toString())
         put(

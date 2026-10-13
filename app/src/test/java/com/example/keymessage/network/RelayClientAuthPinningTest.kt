@@ -99,7 +99,7 @@ class RelayClientAuthPinningTest {
         put("messageId", UUID.randomUUID().toString())
         put("timestamp", challengeTimestamp + 2)
         put("protocolVersion", "2.0")
-        put("identityId", aliceId.value)
+        put("initiatorIdentityId", aliceId.value)
         put("responderIdentityId", pinnedId)
         put("sessionId", UUID.randomUUID().toString())
         put("serverSignature", Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(64)))
